@@ -8,10 +8,12 @@ header('Cache-Control: no-store');
 function responder(int $status, array $dados): void
 {
     http_response_code($status);
+
     echo json_encode(
         $dados,
         JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
     );
+
     exit;
 }
 
@@ -40,8 +42,10 @@ function primeiroValor(array $valores): ?string
     return null;
 }
 
-function extrairIdentificador(array $dados, array $nomes): ?string
-{
+function extrairIdentificador(
+    array $dados,
+    array $nomes
+): ?string {
     $objetos = [
         $dados,
         $dados['TrackingParameters'] ?? [],
@@ -73,6 +77,12 @@ function extrairIdentificador(array $dados, array $nomes): ?string
     return null;
 }
 
+/**
+ * Valida a assinatura recebida na URL.
+ *
+ * O método HMAC-SHA1 só deve ser mantido se confirmado
+ * como compatível com a assinatura oficial da Kiwify.
+ */
 function validarAutenticacao(string $corpo): bool
 {
     $segredo = getenv('KIWIFY_WEBHOOK_SECRET');
@@ -83,7 +93,6 @@ function validarAutenticacao(string $corpo): bool
         return false;
     }
 
-    // A Kiwify envia a assinatura no parâmetro da URL.
     $assinatura = $_GET['signature'] ?? '';
 
     if (!is_string($assinatura) || $assinatura === '') {
@@ -92,8 +101,6 @@ function validarAutenticacao(string $corpo): bool
         return false;
     }
 
-    // Calcula HMAC-SHA1 usando o segredo configurado
-    // e o corpo original recebido.
     $assinaturaEsperada = hash_hmac(
         'sha1',
         $corpo,
@@ -114,7 +121,7 @@ function validarAutenticacao(string $corpo): bool
     return true;
 }
 
-// Aceita somente POST.
+// 1. Aceitar somente requisições POST.
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     header('Allow: POST');
 
@@ -124,7 +131,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     ]);
 }
 
-// Lê o corpo antes de validar a assinatura.
+// 2. Ler o corpo original da requisição.
 $corpo = file_get_contents('php://input');
 
 if (!is_string($corpo) || $corpo === '') {
@@ -136,7 +143,7 @@ if (!is_string($corpo) || $corpo === '') {
     ]);
 }
 
-// Valida a assinatura antes de processar os dados.
+// 3. Validar a assinatura antes de processar o pedido.
 if (!validarAutenticacao($corpo)) {
     responder(401, [
         'success' => false,
@@ -144,6 +151,7 @@ if (!validarAutenticacao($corpo)) {
     ]);
 }
 
+// 4. Decodificar o JSON.
 $dados = json_decode($corpo, true);
 
 if (!is_array($dados) || json_last_error() !== JSON_ERROR_NONE) {
@@ -155,6 +163,7 @@ if (!is_array($dados) || json_last_error() !== JSON_ERROR_NONE) {
     ]);
 }
 
+// 5. Identificar o pedido.
 $idPedido = primeiroValor([
     $dados['order_id'] ?? null,
     $dados['orderId'] ?? null,
@@ -164,6 +173,7 @@ $idPedido = primeiroValor([
     $dados['id'] ?? null
 ]);
 
+// 6. Identificar o status.
 $statusPedido = strtolower(trim((string) primeiroValor([
     $dados['order_status'] ?? null,
     $dados['orderStatus'] ?? null,
@@ -185,6 +195,7 @@ if ($idPedido === null) {
     ]);
 }
 
+// 7. Processar somente status reconhecidos como pagos.
 $statusConfirmados = [
     'paid',
     'approved',
@@ -204,13 +215,22 @@ if (!in_array($statusPedido, $statusConfirmados, true)) {
     ]);
 }
 
+// 8. Obter o valor informado no payload.
 $comissoes = $dados['Commissions']
     ?? $dados['commissions']
     ?? [];
 
+if (!is_array($comissoes)) {
+    $comissoes = [];
+}
+
 $valorBruto = $comissoes['charge_amount'] ?? null;
 
 if (!is_numeric($valorBruto) || (float) $valorBruto <= 0) {
+    registrar('valor_invalido', [
+        'pedido' => $idPedido
+    ]);
+
     responder(400, [
         'success' => false,
         'orderId' => $idPedido,
@@ -218,8 +238,12 @@ if (!is_numeric($valorBruto) || (float) $valorBruto <= 0) {
     ]);
 }
 
-// Mantém a conversão atual, que ainda precisa ser
-// confirmada com um payload real da Kiwify.
+/*
+ * ATENÇÃO:
+ * Esta conversão pressupõe que charge_amount está em centavos.
+ * Confirmar essa unidade com um payload real antes de usar
+ * o valor para enviar conversões ao Google Ads.
+ */
 $valor = round((float) $valorBruto / 100, 2);
 
 $moeda = strtoupper((string) (
@@ -237,6 +261,7 @@ if ($moeda !== 'BRL') {
     ]);
 }
 
+// 9. Extrair identificadores de clique do Google Ads.
 $gclid = extrairIdentificador(
     $dados,
     ['gclid', 'GCLID', 'gclid_id']
@@ -252,6 +277,7 @@ $wbraid = extrairIdentificador(
     ['wbraid', 'WBRAID']
 );
 
+// 10. Registrar o resultado sem expor os identificadores.
 registrar('pagamento_validado', [
     'pedido' => $idPedido,
     'valor' => $valor,
@@ -261,7 +287,7 @@ registrar('pagamento_validado', [
     'tem_wbraid' => $wbraid !== null
 ]);
 
-// Google Ads ainda não está conectado.
+// 11. Google Ads ainda não está conectado.
 // Nenhuma conversão é enviada nesta etapa.
 responder(200, [
     'success' => true,
