@@ -3,6 +3,9 @@
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
+const GOOGLE_ADS_CUSTOMER_ID = '3435514966';
+const GOOGLE_ADS_CONVERSION_ACTION_ID = '7842822186';
+
 function responder(int $status, array $dados): void
 {
     http_response_code($status);
@@ -59,16 +62,14 @@ function extrairIdentificador(
             continue;
         }
 
-        $valores = [];
-
         foreach ($nomes as $nome) {
-            $valores[] = $objeto[$nome] ?? null;
-        }
+            $valor = primeiroValor([
+                $objeto[$nome] ?? null
+            ]);
 
-        $resultado = primeiroValor($valores);
-
-        if ($resultado !== null) {
-            return $resultado;
+            if ($valor !== null) {
+                return $valor;
+            }
         }
     }
 
@@ -91,22 +92,220 @@ function validarAutenticacao(string $corpo): bool
         return false;
     }
 
-    $assinaturaEsperada = hash_hmac('sha1', $corpo, $segredo);
+    $esperada = hash_hmac('sha1', $corpo, $segredo);
 
-    if (!hash_equals($assinaturaEsperada, $assinatura)) {
-        registrar('assinatura_invalida', [
-            'assinatura_recebida' => true,
-            'tamanho_corpo' => strlen($corpo)
-        ]);
-
+    if (!hash_equals($esperada, $assinatura)) {
+        registrar('assinatura_invalida');
         return false;
     }
 
     registrar('assinatura_validada');
+
     return true;
 }
 
-// 1. Aceitar somente requisições POST.
+function obterTokenGoogle(): string
+{
+    $clientId = getenv('GOOGLE_OAUTH_CLIENT_ID');
+    $clientSecret = getenv('GOOGLE_OAUTH_CLIENT_SECRET');
+    $refreshToken = getenv('GOOGLE_OAUTH_REFRESH_TOKEN');
+
+    if (
+        !$clientId ||
+        !$clientSecret ||
+        !$refreshToken
+    ) {
+        throw new RuntimeException(
+            'Variáveis OAuth do Google não configuradas.'
+        );
+    }
+
+    $curl = curl_init(
+        'https://oauth2.googleapis.com/token'
+    );
+
+    curl_setopt_array($curl, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 20,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/x-www-form-urlencoded'
+        ],
+        CURLOPT_POSTFIELDS => http_build_query([
+            'client_id' => $clientId,
+            'client_secret' => $clientSecret,
+            'refresh_token' => $refreshToken,
+            'grant_type' => 'refresh_token'
+        ])
+    ]);
+
+    $resposta = curl_exec($curl);
+    $statusHttp = (int) curl_getinfo(
+        $curl,
+        CURLINFO_HTTP_CODE
+    );
+    $erroCurl = curl_error($curl);
+
+    curl_close($curl);
+
+    if (
+        !is_string($resposta) ||
+        $erroCurl !== '' ||
+        $statusHttp < 200 ||
+        $statusHttp >= 300
+    ) {
+        registrar('erro_token_google', [
+            'http_status' => $statusHttp,
+            'erro_curl' => $erroCurl !== ''
+                ? $erroCurl
+                : null
+        ]);
+
+        throw new RuntimeException(
+            'Não foi possível obter o token OAuth do Google.'
+        );
+    }
+
+    $dados = json_decode($resposta, true);
+
+    if (
+        !is_array($dados) ||
+        empty($dados['access_token'])
+    ) {
+        throw new RuntimeException(
+            'Resposta OAuth do Google sem access_token.'
+        );
+    }
+
+    return $dados['access_token'];
+}
+
+function enviarConversaoGoogle(
+    string $token,
+    string $idPedido,
+    float $valor,
+    string $moeda,
+    string $timestamp,
+    array $identificadores
+): array {
+    $adIdentifiers = [];
+
+    foreach (['gclid', 'gbraid', 'wbraid'] as $campo) {
+        if (!empty($identificadores[$campo])) {
+            $adIdentifiers[$campo] =
+                $identificadores[$campo];
+        }
+    }
+
+    if (count($adIdentifiers) === 0) {
+        return [
+            'sent' => false,
+            'reason' => 'identificador_de_anuncio_ausente'
+        ];
+    }
+
+    $payload = [
+        'destinations' => [
+            [
+                'operatingAccount' => [
+                    'accountType' => 'GOOGLE_ADS',
+                    'accountId' => GOOGLE_ADS_CUSTOMER_ID
+                ],
+                'loginAccount' => [
+                    'accountType' => 'GOOGLE_ADS',
+                    'accountId' => GOOGLE_ADS_CUSTOMER_ID
+                ],
+                'productDestinationId' =>
+                    GOOGLE_ADS_CONVERSION_ACTION_ID
+            ]
+        ],
+        'encoding' => 'HEX',
+        'events' => [
+            [
+                'adIdentifiers' => $adIdentifiers,
+                'conversionValue' => $valor,
+                'currency' => $moeda,
+                'eventTimestamp' => $timestamp,
+                'transactionId' => $idPedido,
+                'eventSource' => 'WEB'
+            ]
+        ],
+        'validateOnly' => false
+    ];
+
+    $curl = curl_init(
+        'https://datamanager.googleapis.com/v1/events:ingest'
+    );
+
+    curl_setopt_array($curl, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 25,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $token,
+            'Content-Type: application/json'
+        ],
+        CURLOPT_POSTFIELDS => json_encode(
+            $payload,
+            JSON_UNESCAPED_SLASHES
+        )
+    ]);
+
+    $resposta = curl_exec($curl);
+    $statusHttp = (int) curl_getinfo(
+        $curl,
+        CURLINFO_HTTP_CODE
+    );
+    $erroCurl = curl_error($curl);
+
+    curl_close($curl);
+
+    $respostaJson = is_string($resposta)
+        ? json_decode($resposta, true)
+        : null;
+
+    if (
+        $erroCurl !== '' ||
+        !is_string($resposta) ||
+        $statusHttp < 200 ||
+        $statusHttp >= 300
+    ) {
+        registrar('erro_envio_google', [
+            'pedido' => $idPedido,
+            'http_status' => $statusHttp,
+            'erro_curl' => $erroCurl !== ''
+                ? $erroCurl
+                : null,
+            'resposta_google' => is_array($respostaJson)
+                ? $respostaJson
+                : null
+        ]);
+
+        return [
+            'sent' => false,
+            'httpStatus' => $statusHttp,
+            'reason' => 'erro_na_api_google'
+        ];
+    }
+
+    registrar('resposta_google_recebida', [
+        'pedido' => $idPedido,
+        'http_status' => $statusHttp,
+        'resposta' => is_array($respostaJson)
+            ? $respostaJson
+            : null
+    ]);
+
+    return [
+        'sent' => true,
+        'httpStatus' => $statusHttp,
+        'message' => 'Solicitação aceita pela API do Google.'
+    ];
+}
+
+// 1. Somente POST.
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     header('Allow: POST');
 
@@ -116,19 +315,17 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     ]);
 }
 
-// 2. Ler o corpo original da requisição.
+// 2. Ler o corpo original.
 $corpo = file_get_contents('php://input');
 
 if (!is_string($corpo) || $corpo === '') {
-    registrar('corpo_vazio');
-
     responder(400, [
         'success' => false,
         'error' => 'Corpo da requisição vazio.'
     ]);
 }
 
-// 3. Validar a assinatura.
+// 3. Validar assinatura da Kiwify.
 if (!validarAutenticacao($corpo)) {
     responder(401, [
         'success' => false,
@@ -136,19 +333,17 @@ if (!validarAutenticacao($corpo)) {
     ]);
 }
 
-// 4. Decodificar o JSON.
+// 4. Decodificar JSON.
 $dados = json_decode($corpo, true);
 
 if (!is_array($dados) || json_last_error() !== JSON_ERROR_NONE) {
-    registrar('json_invalido');
-
     responder(400, [
         'success' => false,
         'error' => 'JSON inválido.'
     ]);
 }
 
-// 5. Identificar o pedido.
+// 5. ID do pedido.
 $idPedido = primeiroValor([
     $dados['order_id'] ?? null,
     $dados['orderId'] ?? null,
@@ -158,7 +353,14 @@ $idPedido = primeiroValor([
     $dados['id'] ?? null
 ]);
 
-// 6. Identificar o status.
+if ($idPedido === null) {
+    responder(400, [
+        'success' => false,
+        'error' => 'ID do pedido ausente.'
+    ]);
+}
+
+// 6. Status.
 $statusPedido = strtolower(trim((string) primeiroValor([
     $dados['order_status'] ?? null,
     $dados['orderStatus'] ?? null,
@@ -173,14 +375,6 @@ registrar('webhook_recebido', [
     'status' => $statusPedido
 ]);
 
-if ($idPedido === null) {
-    responder(400, [
-        'success' => false,
-        'error' => 'ID do pedido ausente.'
-    ]);
-}
-
-// 7. Processar somente status reconhecidos como pagos.
 $statusConfirmados = [
     'paid',
     'approved',
@@ -196,11 +390,11 @@ if (!in_array($statusPedido, $statusConfirmados, true)) {
         'ignored' => true,
         'orderId' => $idPedido,
         'status' => $statusPedido,
-        'message' => 'Evento recebido, mas o pagamento não foi reconhecido como confirmado.'
+        'message' => 'Pagamento não reconhecido como confirmado.'
     ]);
 }
 
-// 8. Obter os dados financeiros.
+// 7. Dados financeiros.
 $comissoes = $dados['Commissions']
     ?? $dados['commissions']
     ?? [];
@@ -209,23 +403,9 @@ if (!is_array($comissoes)) {
     $comissoes = [];
 }
 
-// Registrar os campos financeiros disponíveis, sem dados pessoais.
-registrar('diagnostico_financeiro', [
-    'charge_amount' => $comissoes['charge_amount'] ?? null,
-    'product_base_price' => $comissoes['product_base_price'] ?? null,
-    'currency' => $comissoes['currency'] ?? null,
-    'product_base_price_currency' =>
-        $comissoes['product_base_price_currency'] ?? null,
-    'campos_comissoes' => array_keys($comissoes)
-]);
-
 $valorBruto = $comissoes['charge_amount'] ?? null;
 
 if (!is_numeric($valorBruto) || (float) $valorBruto <= 0) {
-    registrar('valor_invalido', [
-        'pedido' => $idPedido
-    ]);
-
     responder(400, [
         'success' => false,
         'orderId' => $idPedido,
@@ -233,8 +413,11 @@ if (!is_numeric($valorBruto) || (float) $valorBruto <= 0) {
     ]);
 }
 
-// Mantém o cálculo atual provisoriamente.
-// Não enviar esse valor ao Google Ads até confirmar sua exatidão.
+/*
+ * ATENÇÃO:
+ * Mantém a conversão atual de centavos para reais.
+ * Confirme a unidade real de charge_amount antes da produção.
+ */
 $valor = round((float) $valorBruto / 100, 2);
 
 $moeda = strtoupper((string) (
@@ -248,51 +431,119 @@ if ($moeda !== 'BRL') {
         'success' => false,
         'orderId' => $idPedido,
         'currency' => $moeda,
-        'error' => 'Esta versão está configurada para vendas em BRL.'
+        'error' => 'Moeda não suportada por esta configuração.'
     ]);
 }
 
-// 9. Extrair identificadores de clique do Google Ads.
-$gclid = extrairIdentificador(
-    $dados,
-    ['gclid', 'GCLID', 'gclid_id']
-);
+// 8. Identificadores de clique.
+$identificadores = [
+    'gclid' => extrairIdentificador(
+        $dados,
+        ['gclid', 'GCLID', 'gclid_id']
+    ),
+    'gbraid' => extrairIdentificador(
+        $dados,
+        ['gbraid', 'GBRAID']
+    ),
+    'wbraid' => extrairIdentificador(
+        $dados,
+        ['wbraid', 'WBRAID']
+    )
+];
 
-$gbraid = extrairIdentificador(
-    $dados,
-    ['gbraid', 'GBRAID']
-);
-
-$wbraid = extrairIdentificador(
-    $dados,
-    ['wbraid', 'WBRAID']
-);
-
-// 10. Registrar o resultado sem expor os identificadores.
 registrar('pagamento_validado', [
     'pedido' => $idPedido,
     'valor' => $valor,
     'moeda' => $moeda,
-    'tem_gclid' => $gclid !== null,
-    'tem_gbraid' => $gbraid !== null,
-    'tem_wbraid' => $wbraid !== null
+    'tem_gclid' => $identificadores['gclid'] !== null,
+    'tem_gbraid' => $identificadores['gbraid'] !== null,
+    'tem_wbraid' => $identificadores['wbraid'] !== null
 ]);
 
-// 11. Google Ads ainda não está conectado.
+// 9. Sem identificador, não envia evento incompleto.
+if (
+    !$identificadores['gclid'] &&
+    !$identificadores['gbraid'] &&
+    !$identificadores['wbraid']
+) {
+    registrar('conversao_nao_enviada_sem_identificador', [
+        'pedido' => $idPedido
+    ]);
+
+    responder(200, [
+        'success' => true,
+        'orderId' => $idPedido,
+        'status' => $statusPedido,
+        'value' => $valor,
+        'currency' => $moeda,
+        'googleAds' => [
+            'configured' => true,
+            'sent' => false,
+            'reason' => 'identificador_de_anuncio_ausente'
+        ],
+        'message' => 'Pagamento confirmado, mas não enviado ao Google Ads porque o webhook não contém gclid, gbraid ou wbraid.'
+    ]);
+}
+
+// 10. Data/hora do evento.
+$timestampOriginal = primeiroValor([
+    $dados['approved_at'] ?? null,
+    $dados['paid_at'] ?? null,
+    $dados['created_at'] ?? null,
+    $dados['updated_at'] ?? null,
+    $dados['order']['approved_at'] ?? null,
+    $dados['order']['created_at'] ?? null
+]);
+
+$timestamp = $timestampOriginal !== null
+    ? strtotime($timestampOriginal)
+    : false;
+
+if ($timestamp === false) {
+    $timestamp = time();
+}
+
+$timestampGoogle = gmdate('Y-m-d\TH:i:s\Z', $timestamp);
+
+// 11. Enviar ao Google.
+try {
+    $token = obterTokenGoogle();
+
+    $resultadoGoogle = enviarConversaoGoogle(
+        $token,
+        $idPedido,
+        $valor,
+        $moeda,
+        $timestampGoogle,
+        $identificadores
+    );
+} catch (Throwable $e) {
+    registrar('falha_google_ads', [
+        'pedido' => $idPedido,
+        'erro' => $e->getMessage()
+    ]);
+
+    responder(200, [
+        'success' => true,
+        'orderId' => $idPedido,
+        'status' => $statusPedido,
+        'googleAds' => [
+            'configured' => true,
+            'sent' => false,
+            'reason' => 'falha_na_integracao'
+        ],
+        'message' => 'Pagamento recebido. O envio ao Google Ads falhou; confira os logs da Vercel.'
+    ]);
+}
+
+// 12. Resultado.
 responder(200, [
     'success' => true,
     'orderId' => $idPedido,
     'status' => $statusPedido,
     'value' => $valor,
     'currency' => $moeda,
-    'clickIdentifiers' => [
-        'gclid' => $gclid !== null,
-        'gbraid' => $gbraid !== null,
-        'wbraid' => $wbraid !== null
-    ],
-    'googleAds' => [
-        'configured' => false,
-        'sent' => false
-    ],
-    'message' => 'Webhook recebido. Google Ads ainda não conectado.'
+    'googleAds' => array_merge([
+        'configured' => true
+    ], $resultadoGoogle)
 ]);
