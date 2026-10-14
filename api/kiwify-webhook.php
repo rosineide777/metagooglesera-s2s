@@ -1,3 +1,4 @@
+
 <?php
 declare(strict_types=1);
 
@@ -7,7 +8,10 @@ header('Cache-Control: no-store');
 function responder(int $status, array $dados): void
 {
     http_response_code($status);
-    echo json_encode($dados, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    echo json_encode(
+        $dados,
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
     exit;
 }
 
@@ -69,28 +73,48 @@ function extrairIdentificador(array $dados, array $nomes): ?string
     return null;
 }
 
-function validarAutenticacao(): bool
+function validarAutenticacao(string $corpo): bool
 {
-    $segredoEsperado = getenv('KIWIFY_WEBHOOK_SECRET');
+    $segredo = getenv('KIWIFY_WEBHOOK_SECRET');
 
-    if (!is_string($segredoEsperado) || $segredoEsperado === '') {
+    if (!is_string($segredo) || $segredo === '') {
         registrar('segredo_nao_configurado');
+
         return false;
     }
 
-    $assinatura = $_SERVER['HTTP_X_KIWIFY_SIGNATURE'] ?? null;
+    // A Kiwify envia a assinatura no parâmetro da URL.
+    $assinatura = $_GET['signature'] ?? '';
 
     if (!is_string($assinatura) || $assinatura === '') {
-        $assinatura = $_GET['signature'] ?? null;
-    }
+        registrar('assinatura_ausente');
 
-    if (!is_string($assinatura) || $assinatura === '') {
         return false;
     }
 
-    return hash_equals($segredoEsperado, $assinatura);
+    // Calcula HMAC-SHA1 usando o segredo configurado
+    // e o corpo original recebido.
+    $assinaturaEsperada = hash_hmac(
+        'sha1',
+        $corpo,
+        $segredo
+    );
+
+    if (!hash_equals($assinaturaEsperada, $assinatura)) {
+        registrar('assinatura_invalida', [
+            'assinatura_recebida' => true,
+            'tamanho_corpo' => strlen($corpo)
+        ]);
+
+        return false;
+    }
+
+    registrar('assinatura_validada');
+
+    return true;
 }
 
+// Aceita somente POST.
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     header('Allow: POST');
 
@@ -100,25 +124,31 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     ]);
 }
 
-if (!validarAutenticacao()) {
-    responder(401, [
-        'success' => false,
-        'error' => 'Autenticação inválida ou não configurada.'
-    ]);
-}
-
+// Lê o corpo antes de validar a assinatura.
 $corpo = file_get_contents('php://input');
 
 if (!is_string($corpo) || $corpo === '') {
+    registrar('corpo_vazio');
+
     responder(400, [
         'success' => false,
         'error' => 'Corpo da requisição vazio.'
     ]);
 }
 
+// Valida a assinatura antes de processar os dados.
+if (!validarAutenticacao($corpo)) {
+    responder(401, [
+        'success' => false,
+        'error' => 'Assinatura inválida ou segredo não configurado.'
+    ]);
+}
+
 $dados = json_decode($corpo, true);
 
 if (!is_array($dados) || json_last_error() !== JSON_ERROR_NONE) {
+    registrar('json_invalido');
+
     responder(400, [
         'success' => false,
         'error' => 'JSON inválido.'
@@ -174,7 +204,10 @@ if (!in_array($statusPedido, $statusConfirmados, true)) {
     ]);
 }
 
-$comissoes = $dados['Commissions'] ?? $dados['commissions'] ?? [];
+$comissoes = $dados['Commissions']
+    ?? $dados['commissions']
+    ?? [];
+
 $valorBruto = $comissoes['charge_amount'] ?? null;
 
 if (!is_numeric($valorBruto) || (float) $valorBruto <= 0) {
@@ -185,10 +218,8 @@ if (!is_numeric($valorBruto) || (float) $valorBruto <= 0) {
     ]);
 }
 
-/*
- * Pressupõe charge_amount em centavos.
- * Confirmar com o payload real da Kiwify antes da ativação.
- */
+// Mantém a conversão atual, que ainda precisa ser
+// confirmada com um payload real da Kiwify.
 $valor = round((float) $valorBruto / 100, 2);
 
 $moeda = strtoupper((string) (
@@ -206,9 +237,20 @@ if ($moeda !== 'BRL') {
     ]);
 }
 
-$gclid = extrairIdentificador($dados, ['gclid', 'GCLID', 'gclid_id']);
-$gbraid = extrairIdentificador($dados, ['gbraid', 'GBRAID']);
-$wbraid = extrairIdentificador($dados, ['wbraid', 'WBRAID']);
+$gclid = extrairIdentificador(
+    $dados,
+    ['gclid', 'GCLID', 'gclid_id']
+);
+
+$gbraid = extrairIdentificador(
+    $dados,
+    ['gbraid', 'GBRAID']
+);
+
+$wbraid = extrairIdentificador(
+    $dados,
+    ['wbraid', 'WBRAID']
+);
 
 registrar('pagamento_validado', [
     'pedido' => $idPedido,
@@ -219,11 +261,8 @@ registrar('pagamento_validado', [
     'tem_wbraid' => $wbraid !== null
 ]);
 
-/*
- * Integração Google Ads pendente.
- * Ainda não envia conversões para a API.
- */
-
+// Google Ads ainda não está conectado.
+// Nenhuma conversão é enviada nesta etapa.
 responder(200, [
     'success' => true,
     'orderId' => $idPedido,
@@ -239,5 +278,5 @@ responder(200, [
         'configured' => false,
         'sent' => false
     ],
-    'message' => 'Pagamento validado. Integração com o Google Ads ainda não ativada.'
+    'message' => 'Webhook recebido. Google Ads ainda não conectado.'
 ]);
