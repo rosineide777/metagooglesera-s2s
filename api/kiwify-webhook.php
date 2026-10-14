@@ -609,9 +609,15 @@ $timestampGoogle = gmdate(
     $timestamp
 );
 
+
 /* =========================================================
    11. ENVIAR PARA O GOOGLE
    ========================================================= */
+
+$resultadoGoogle = [
+    'sent' => false,
+    'reason' => 'envio_nao_concluido'
+];
 
 try {
     $token = obterTokenGoogle();
@@ -656,6 +662,10 @@ responder(200, [
     'currency' => $moeda,
     'googleAds' => array_merge(
         ['configured' => true],
-        $resultadoGoogle
+        is_array($resultadoGoogle) ? $resultadoGoogle : [
+            'sent' => false,
+            'reason' => 'resposta_google_invalida'
+        ]
     )
 ]);
+
