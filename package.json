@@ -1,6 +1,6 @@
 {
   "name": "metagooglesera-s2s",
   "version": "1.0.0",
-  "description": "Servidor S2S isolado para Postbacks do BeMob (Serasa)",
+  "private": true,
   "type": "module"
 }

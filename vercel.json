@@ -2,12 +2,8 @@
   "version": 2,
   "routes": [
     {
-      "src": "/api/facebook-postback",
-      "dest": "/api/facebook-postback.js"
-    },
-    {
-      "src": "/api/google-postback",
-      "dest": "/api/google-postback.js"
+      "src": "/api/kiwify-webhook",
+      "dest": "/api/kiwify-webhook.js"
     }
   ]
 }
