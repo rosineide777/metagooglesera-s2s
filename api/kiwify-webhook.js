@@ -62,8 +62,14 @@ function getValue(body) {
 async function sendBeMob({ subid, orderId, value }) {
   const postbackUrl = process.env.BEMOB_POSTBACK_URL;
 
+  // Se a URL do BeMob não estiver configurada, não quebra a aplicação (modo de teste seguro)
   if (!postbackUrl) {
-    throw new Error('BEMOB_POSTBACK_URL não configurada.');
+    console.warn('Aviso: BEMOB_POSTBACK_URL não configurada. O postback foi simulado com sucesso.');
+    return {
+      success: true,
+      simulated: true,
+      message: 'BeMob postback simulado (URL não configurada).'
+    };
   }
 
   if (!subid) {
@@ -165,10 +171,10 @@ export default async function handler(req, res) {
       currency: 'BRL',
       subid,
       results: { bemob },
-      message: 'Postback encaminhado ao BeMob com sucesso.'
+      message: 'Webhook da Kiwify processado com sucesso.'
     });
   } catch (error) {
-    console.error('Falha no encaminhamento ao BeMob:', error.message);
+    console.error('Falha no encaminhamento:', error.message);
 
     return res.status(502).json({
       success: false,
