@@ -1,10 +1,15 @@
 
 {
   "version": 2,
+  "functions": {
+    "api/kiwify-webhook.php": {
+      "runtime": "vercel-php@0.7.3"
+    }
+  },
   "routes": [
     {
-      "src": "/api/kiwify-webhook",
-      "dest": "/api/kiwify-webhook.js"
+      "src": "^/api/kiwify-webhook(?:\\.php)?$",
+      "dest": "/api/kiwify-webhook.php"
     }
   ]
 }
