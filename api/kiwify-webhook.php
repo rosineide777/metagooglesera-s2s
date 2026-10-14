@@ -75,19 +75,12 @@ function extrairIdentificador(
     return null;
 }
 
-/**
- * Valida a assinatura recebida na URL.
- *
- * O método HMAC-SHA1 só deve ser mantido se confirmado
- * como compatível com a assinatura oficial da Kiwify.
- */
 function validarAutenticacao(string $corpo): bool
 {
     $segredo = getenv('KIWIFY_WEBHOOK_SECRET');
 
     if (!is_string($segredo) || $segredo === '') {
         registrar('segredo_nao_configurado');
-
         return false;
     }
 
@@ -95,15 +88,10 @@ function validarAutenticacao(string $corpo): bool
 
     if (!is_string($assinatura) || $assinatura === '') {
         registrar('assinatura_ausente');
-
         return false;
     }
 
-    $assinaturaEsperada = hash_hmac(
-        'sha1',
-        $corpo,
-        $segredo
-    );
+    $assinaturaEsperada = hash_hmac('sha1', $corpo, $segredo);
 
     if (!hash_equals($assinaturaEsperada, $assinatura)) {
         registrar('assinatura_invalida', [
@@ -115,7 +103,6 @@ function validarAutenticacao(string $corpo): bool
     }
 
     registrar('assinatura_validada');
-
     return true;
 }
 
@@ -141,7 +128,7 @@ if (!is_string($corpo) || $corpo === '') {
     ]);
 }
 
-// 3. Validar a assinatura antes de processar o pedido.
+// 3. Validar a assinatura.
 if (!validarAutenticacao($corpo)) {
     responder(401, [
         'success' => false,
@@ -213,7 +200,7 @@ if (!in_array($statusPedido, $statusConfirmados, true)) {
     ]);
 }
 
-// 8. Obter o valor informado no payload.
+// 8. Obter os dados financeiros.
 $comissoes = $dados['Commissions']
     ?? $dados['commissions']
     ?? [];
@@ -221,6 +208,16 @@ $comissoes = $dados['Commissions']
 if (!is_array($comissoes)) {
     $comissoes = [];
 }
+
+// Registrar os campos financeiros disponíveis, sem dados pessoais.
+registrar('diagnostico_financeiro', [
+    'charge_amount' => $comissoes['charge_amount'] ?? null,
+    'product_base_price' => $comissoes['product_base_price'] ?? null,
+    'currency' => $comissoes['currency'] ?? null,
+    'product_base_price_currency' =>
+        $comissoes['product_base_price_currency'] ?? null,
+    'campos_comissoes' => array_keys($comissoes)
+]);
 
 $valorBruto = $comissoes['charge_amount'] ?? null;
 
@@ -236,12 +233,8 @@ if (!is_numeric($valorBruto) || (float) $valorBruto <= 0) {
     ]);
 }
 
-/*
- * ATENÇÃO:
- * Esta conversão pressupõe que charge_amount está em centavos.
- * Confirmar essa unidade com um payload real antes de usar
- * o valor para enviar conversões ao Google Ads.
- */
+// Mantém o cálculo atual provisoriamente.
+// Não enviar esse valor ao Google Ads até confirmar sua exatidão.
 $valor = round((float) $valorBruto / 100, 2);
 
 $moeda = strtoupper((string) (
@@ -286,7 +279,6 @@ registrar('pagamento_validado', [
 ]);
 
 // 11. Google Ads ainda não está conectado.
-// Nenhuma conversão é enviada nesta etapa.
 responder(200, [
     'success' => true,
     'orderId' => $idPedido,
