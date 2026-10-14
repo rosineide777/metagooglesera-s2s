@@ -1,3 +1,4 @@
+
 <?php
 
 header('Content-Type: application/json; charset=utf-8');
@@ -5,6 +6,10 @@ header('Cache-Control: no-store');
 
 const GOOGLE_ADS_CUSTOMER_ID = '3435514966';
 const GOOGLE_ADS_CONVERSION_ACTION_ID = '7842822186';
+
+/* =========================================================
+   RESPOSTAS E LOGS
+   ========================================================= */
 
 function responder(int $status, array $dados): void
 {
@@ -28,6 +33,10 @@ function registrar(string $evento, array $dados = []): void
     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 }
 
+/* =========================================================
+   PRIMEIRO VALOR VÁLIDO
+   ========================================================= */
+
 function primeiroValor(array $valores): ?string
 {
     foreach ($valores as $valor) {
@@ -43,38 +52,57 @@ function primeiroValor(array $valores): ?string
     return null;
 }
 
+/* =========================================================
+   BUSCA RECURSIVA DE IDENTIFICADORES
+   ========================================================= */
+
 function extrairIdentificador(
     array $dados,
     array $nomes
 ): ?string {
-    $objetos = [
-        $dados,
-        $dados['TrackingParameters'] ?? [],
-        $dados['trackingParameters'] ?? [],
-        $dados['tracking_parameters'] ?? [],
-        $dados['tracking'] ?? [],
-        $dados['tracking_data'] ?? [],
-        $dados['metadata'] ?? []
-    ];
+    $nomesNormalizados = array_map(
+        'strtolower',
+        $nomes
+    );
 
-    foreach ($objetos as $objeto) {
-        if (!is_array($objeto)) {
-            continue;
-        }
+    $buscar = function (array $objeto) use (
+        &$buscar,
+        $nomesNormalizados
+    ): ?string {
+        foreach ($objeto as $chave => $valor) {
+            if (
+                is_string($chave) &&
+                in_array(
+                    strtolower($chave),
+                    $nomesNormalizados,
+                    true
+                )
+            ) {
+                $resultado = primeiroValor([$valor]);
 
-        foreach ($nomes as $nome) {
-            $valor = primeiroValor([
-                $objeto[$nome] ?? null
-            ]);
+                if ($resultado !== null) {
+                    return $resultado;
+                }
+            }
 
-            if ($valor !== null) {
-                return $valor;
+            if (is_array($valor)) {
+                $resultado = $buscar($valor);
+
+                if ($resultado !== null) {
+                    return $resultado;
+                }
             }
         }
-    }
 
-    return null;
+        return null;
+    };
+
+    return $buscar($dados);
 }
+
+/* =========================================================
+   VALIDAÇÃO DA ASSINATURA KIWIFY
+   ========================================================= */
 
 function validarAutenticacao(string $corpo): bool
 {
@@ -103,6 +131,10 @@ function validarAutenticacao(string $corpo): bool
 
     return true;
 }
+
+/* =========================================================
+   TOKEN OAUTH DO GOOGLE
+   ========================================================= */
 
 function obterTokenGoogle(): string
 {
@@ -141,10 +173,12 @@ function obterTokenGoogle(): string
     ]);
 
     $resposta = curl_exec($curl);
+
     $statusHttp = (int) curl_getinfo(
         $curl,
         CURLINFO_HTTP_CODE
     );
+
     $erroCurl = curl_error($curl);
 
     curl_close($curl);
@@ -181,6 +215,10 @@ function obterTokenGoogle(): string
     return $dados['access_token'];
 }
 
+/* =========================================================
+   ENVIO DA CONVERSÃO PARA O GOOGLE DATA MANAGER API
+   ========================================================= */
+
 function enviarConversaoGoogle(
     string $token,
     string $idPedido,
@@ -192,7 +230,10 @@ function enviarConversaoGoogle(
     $adIdentifiers = [];
 
     foreach (['gclid', 'gbraid', 'wbraid'] as $campo) {
-        if (!empty($identificadores[$campo])) {
+        if (
+            isset($identificadores[$campo]) &&
+            $identificadores[$campo] !== ''
+        ) {
             $adIdentifiers[$campo] =
                 $identificadores[$campo];
         }
@@ -234,6 +275,17 @@ function enviarConversaoGoogle(
         'validateOnly' => false
     ];
 
+    $corpoJson = json_encode(
+        $payload,
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+
+    if (!is_string($corpoJson)) {
+        throw new RuntimeException(
+            'Não foi possível montar o JSON para o Google.'
+        );
+    }
+
     $curl = curl_init(
         'https://datamanager.googleapis.com/v1/events:ingest'
     );
@@ -247,17 +299,16 @@ function enviarConversaoGoogle(
             'Authorization: Bearer ' . $token,
             'Content-Type: application/json'
         ],
-        CURLOPT_POSTFIELDS => json_encode(
-            $payload,
-            JSON_UNESCAPED_SLASHES
-        )
+        CURLOPT_POSTFIELDS => $corpoJson
     ]);
 
     $resposta = curl_exec($curl);
+
     $statusHttp = (int) curl_getinfo(
         $curl,
         CURLINFO_HTTP_CODE
     );
+
     $erroCurl = curl_error($curl);
 
     curl_close($curl);
@@ -305,7 +356,10 @@ function enviarConversaoGoogle(
     ];
 }
 
-// 1. Somente POST.
+/* =========================================================
+   1. SOMENTE POST
+   ========================================================= */
+
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     header('Allow: POST');
 
@@ -315,7 +369,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     ]);
 }
 
-// 2. Ler o corpo original.
+/* =========================================================
+   2. LER CORPO ORIGINAL
+   ========================================================= */
+
 $corpo = file_get_contents('php://input');
 
 if (!is_string($corpo) || $corpo === '') {
@@ -325,7 +382,10 @@ if (!is_string($corpo) || $corpo === '') {
     ]);
 }
 
-// 3. Validar assinatura da Kiwify.
+/* =========================================================
+   3. VALIDAR ASSINATURA
+   ========================================================= */
+
 if (!validarAutenticacao($corpo)) {
     responder(401, [
         'success' => false,
@@ -333,17 +393,26 @@ if (!validarAutenticacao($corpo)) {
     ]);
 }
 
-// 4. Decodificar JSON.
+/* =========================================================
+   4. DECODIFICAR JSON
+   ========================================================= */
+
 $dados = json_decode($corpo, true);
 
-if (!is_array($dados) || json_last_error() !== JSON_ERROR_NONE) {
+if (
+    !is_array($dados) ||
+    json_last_error() !== JSON_ERROR_NONE
+) {
     responder(400, [
         'success' => false,
         'error' => 'JSON inválido.'
     ]);
 }
 
-// 5. ID do pedido.
+/* =========================================================
+   5. IDENTIFICAR PEDIDO
+   ========================================================= */
+
 $idPedido = primeiroValor([
     $dados['order_id'] ?? null,
     $dados['orderId'] ?? null,
@@ -360,7 +429,10 @@ if ($idPedido === null) {
     ]);
 }
 
-// 6. Status.
+/* =========================================================
+   6. VALIDAR STATUS DO PEDIDO
+   ========================================================= */
+
 $statusPedido = strtolower(trim((string) primeiroValor([
     $dados['order_status'] ?? null,
     $dados['orderStatus'] ?? null,
@@ -394,7 +466,10 @@ if (!in_array($statusPedido, $statusConfirmados, true)) {
     ]);
 }
 
-// 7. Dados financeiros.
+/* =========================================================
+   7. DADOS FINANCEIROS
+   ========================================================= */
+
 $comissoes = $dados['Commissions']
     ?? $dados['commissions']
     ?? [];
@@ -405,7 +480,10 @@ if (!is_array($comissoes)) {
 
 $valorBruto = $comissoes['charge_amount'] ?? null;
 
-if (!is_numeric($valorBruto) || (float) $valorBruto <= 0) {
+if (
+    !is_numeric($valorBruto) ||
+    (float) $valorBruto <= 0
+) {
     responder(400, [
         'success' => false,
         'orderId' => $idPedido,
@@ -414,10 +492,10 @@ if (!is_numeric($valorBruto) || (float) $valorBruto <= 0) {
 }
 
 /*
- * ATENÇÃO:
- * Mantém a conversão atual de centavos para reais.
- * Confirme a unidade real de charge_amount antes da produção.
+ * Mantida a regra anterior de dividir charge_amount por 100.
+ * A unidade precisa ser confirmada com o payload real da Kiwify.
  */
+
 $valor = round((float) $valorBruto / 100, 2);
 
 $moeda = strtoupper((string) (
@@ -435,19 +513,36 @@ if ($moeda !== 'BRL') {
     ]);
 }
 
-// 8. Identificadores de clique.
+/* =========================================================
+   8. EXTRAIR IDENTIFICADORES DE ANÚNCIO
+   ========================================================= */
+
 $identificadores = [
     'gclid' => extrairIdentificador(
         $dados,
-        ['gclid', 'GCLID', 'gclid_id']
+        [
+            'gclid',
+            'GCLID',
+            'gclid_id',
+            'google_click_id',
+            'googleClickId'
+        ]
     ),
+
     'gbraid' => extrairIdentificador(
         $dados,
-        ['gbraid', 'GBRAID']
+        [
+            'gbraid',
+            'GBRAID'
+        ]
     ),
+
     'wbraid' => extrairIdentificador(
         $dados,
-        ['wbraid', 'WBRAID']
+        [
+            'wbraid',
+            'WBRAID'
+        ]
     )
 ];
 
@@ -455,16 +550,19 @@ registrar('pagamento_validado', [
     'pedido' => $idPedido,
     'valor' => $valor,
     'moeda' => $moeda,
-    'tem_gclid' => $identificadores['gclid'] !== null,
-    'tem_gbraid' => $identificadores['gbraid'] !== null,
-    'tem_wbraid' => $identificadores['wbraid'] !== null
+    'tem_gclid' => !empty($identificadores['gclid']),
+    'tem_gbraid' => !empty($identificadores['gbraid']),
+    'tem_wbraid' => !empty($identificadores['wbraid'])
 ]);
 
-// 9. Sem identificador, não envia evento incompleto.
+/* =========================================================
+   9. NÃO ENVIAR SEM IDENTIFICADOR
+   ========================================================= */
+
 if (
-    !$identificadores['gclid'] &&
-    !$identificadores['gbraid'] &&
-    !$identificadores['wbraid']
+    empty($identificadores['gclid']) &&
+    empty($identificadores['gbraid']) &&
+    empty($identificadores['wbraid'])
 ) {
     registrar('conversao_nao_enviada_sem_identificador', [
         'pedido' => $idPedido
@@ -481,11 +579,14 @@ if (
             'sent' => false,
             'reason' => 'identificador_de_anuncio_ausente'
         ],
-        'message' => 'Pagamento confirmado, mas não enviado ao Google Ads porque o webhook não contém gclid, gbraid ou wbraid.'
+        'message' => 'Evento recebido, mas não enviado ao Google Ads porque o webhook não contém um identificador reconhecido.'
     ]);
 }
 
-// 10. Data/hora do evento.
+/* =========================================================
+   10. DATA E HORA DO EVENTO
+   ========================================================= */
+
 $timestampOriginal = primeiroValor([
     $dados['approved_at'] ?? null,
     $dados['paid_at'] ?? null,
@@ -503,9 +604,15 @@ if ($timestamp === false) {
     $timestamp = time();
 }
 
-$timestampGoogle = gmdate('Y-m-d\TH:i:s\Z', $timestamp);
+$timestampGoogle = gmdate(
+    'Y-m-d\TH:i:s\Z',
+    $timestamp
+);
 
-// 11. Enviar ao Google.
+/* =========================================================
+   11. ENVIAR PARA O GOOGLE
+   ========================================================= */
+
 try {
     $token = obterTokenGoogle();
 
@@ -517,6 +624,7 @@ try {
         $timestampGoogle,
         $identificadores
     );
+
 } catch (Throwable $e) {
     registrar('falha_google_ads', [
         'pedido' => $idPedido,
@@ -532,18 +640,22 @@ try {
             'sent' => false,
             'reason' => 'falha_na_integracao'
         ],
-        'message' => 'Pagamento recebido. O envio ao Google Ads falhou; confira os logs da Vercel.'
+        'message' => 'Evento recebido. O envio ao Google Ads falhou; confira os logs da Vercel.'
     ]);
 }
 
-// 12. Resultado.
+/* =========================================================
+   12. RESPOSTA FINAL
+   ========================================================= */
+
 responder(200, [
     'success' => true,
     'orderId' => $idPedido,
     'status' => $statusPedido,
     'value' => $valor,
     'currency' => $moeda,
-    'googleAds' => array_merge([
-        'configured' => true
-    ], $resultadoGoogle)
+    'googleAds' => array_merge(
+        ['configured' => true],
+        $resultadoGoogle
+    )
 ]);
