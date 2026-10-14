@@ -65,8 +65,8 @@ function getValue(body) {
     return null;
   }
 
-  // Não presumir que o valor está em centavos.
-  // Confirmaremos o formato com o payload real da Kiwify.
+  // Mantém o valor recebido sem presumir que esteja em centavos.
+  // O formato será confirmado pelo diagnóstico do payload.
   return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
@@ -81,10 +81,104 @@ function isConfirmedPayment(status) {
   ].includes(status);
 }
 
+function getPayloadDiagnostic(body) {
+  const amountFields = {};
+
+  const candidates = [
+    'order_amount',
+    'order_price',
+    'total_amount',
+    'total',
+    'price'
+  ];
+
+  for (const field of candidates) {
+    if (
+      body[field] !== undefined &&
+      body[field] !== null
+    ) {
+      amountFields[field] = body[field];
+    }
+  }
+
+  if (body.order && typeof body.order === 'object') {
+    amountFields.order_price = body.order.price ?? null;
+  }
+
+  const commissions =
+    body.Commissions ??
+    body.commissions ??
+    {};
+
+  let commissionDiagnostic = null;
+
+  if (
+    commissions &&
+    typeof commissions === 'object' &&
+    !Array.isArray(commissions)
+  ) {
+    commissionDiagnostic = Object.fromEntries(
+      Object.entries(commissions).filter(([key, value]) =>
+        /amount|price|value|currency|commission|fee|total|net|charge/i.test(key) &&
+        (
+          typeof value === 'string' ||
+          typeof value === 'number' ||
+          typeof value === 'boolean' ||
+          value === null
+        )
+      )
+    );
+  }
+
+  const trackingParameters =
+    body.TrackingParameters ??
+    body.trackingParameters ??
+    body.tracking_parameters ??
+    body.tracking_parameters_data ??
+    body.tracking ??
+    body.trackingData ??
+    body.tracking_data ??
+    body.metadata ??
+    {};
+
+  let trackingDiagnostic = null;
+
+  if (
+    trackingParameters &&
+    typeof trackingParameters === 'object' &&
+    !Array.isArray(trackingParameters)
+  ) {
+    trackingDiagnostic = {
+      keys: Object.keys(trackingParameters),
+      values: Object.fromEntries(
+        Object.entries(trackingParameters).filter(([key, value]) =>
+          /sub.?id|click.?id|bemob|cid|gclid|utm|source|campaign|medium|term|content|^s[1-5]$/i.test(key) &&
+          (
+            typeof value === 'string' ||
+            typeof value === 'number' ||
+            typeof value === 'boolean' ||
+            value === null
+          )
+        )
+      )
+    };
+  } else if (trackingParameters !== undefined) {
+    trackingDiagnostic = {
+      type: typeof trackingParameters
+    };
+  }
+
+  return {
+    amountFields,
+    commissions: commissionDiagnostic,
+    trackingParameters: trackingDiagnostic
+  };
+}
+
 async function sendBeMob({ subid, orderId, value }) {
   const postbackUrl = process.env.BEMOB_POSTBACK_URL;
 
-  // O BeMob ainda não será utilizado nesta etapa.
+  // O BeMob permanece desativado enquanto configuramos a Kiwify.
   if (!postbackUrl) {
     logEvent('bemob_not_configured', {
       orderId,
@@ -95,13 +189,14 @@ async function sendBeMob({ subid, orderId, value }) {
       success: false,
       simulated: false,
       configured: false,
-      message: 'BeMob ainda não configurado. Webhook da Kiwify testado separadamente.'
+      message:
+        'BeMob ainda não configurado. Webhook da Kiwify testado separadamente.'
     };
   }
 
   if (!subid) {
     throw new Error(
-      'ID de rastreamento ausente. Verifique o payload da Kiwify.'
+      'ID de rastreamento ausente. Verifique o diagnóstico do payload da Kiwify.'
     );
   }
 
@@ -172,7 +267,6 @@ export default async function handler(req, res) {
   });
 
   try {
-    // Valida a autenticação configurada no projeto.
     if (!validateWebhookAuth(req)) {
       logEvent('authentication_failed');
 
@@ -184,7 +278,6 @@ export default async function handler(req, res) {
 
     let body = req.body;
 
-    // Aceita JSON já interpretado ou JSON recebido como texto.
     if (typeof body === 'string') {
       try {
         body = JSON.parse(body);
@@ -210,11 +303,18 @@ export default async function handler(req, res) {
     const orderId = getOrderId(body);
     const status = getOrderStatus(body);
 
-    // Registra os campos disponíveis sem imprimir dados pessoais.
     logEvent('payload_received', {
       orderId,
       status: status || '(vazio)',
       fields: Object.keys(body)
+    });
+
+    // Diagnóstico temporário para descobrir o formato dos valores
+    // e a localização dos parâmetros de rastreamento.
+    // Não registra o objeto completo nem dados pessoais do comprador.
+    logEvent('payload_diagnostic', {
+      orderId,
+      ...getPayloadDiagnostic(body)
     });
 
     if (!orderId) {
@@ -226,7 +326,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Não registra venda se o status não indicar pagamento confirmado.
     if (!isConfirmedPayment(status)) {
       logEvent('order_ignored', {
         orderId,
@@ -239,7 +338,8 @@ export default async function handler(req, res) {
         ignored: true,
         orderId,
         status,
-        message: 'Webhook recebido, mas nenhuma venda foi processada.'
+        message:
+          'Webhook recebido, mas nenhuma venda foi processada.'
       });
     }
 
@@ -293,21 +393,24 @@ export default async function handler(req, res) {
         },
         bemob
       },
-      message: 'Webhook recebido e processado pela aplicação.'
+      message:
+        'Webhook recebido e processado pela aplicação.'
     });
   } catch (error) {
     logEvent('processing_failed', {
-      error: error instanceof Error
-        ? error.message
-        : 'Erro desconhecido'
+      error:
+        error instanceof Error
+          ? error.message
+          : 'Erro desconhecido'
     });
 
     return res.status(500).json({
       success: false,
       error: 'Falha ao processar o webhook.',
-      details: error instanceof Error
-        ? error.message
-        : 'Erro desconhecido'
+      details:
+        error instanceof Error
+          ? error.message
+          : 'Erro desconhecido'
     });
   }
 }
