@@ -1,26 +1,34 @@
-
-import crypto from 'crypto';
 import { extractTrackingId } from '../lib/tracking.js';
 import { validateWebhookAuth } from '../lib/auth.js';
 
-function sha256(value) {
-  return crypto
-    .createHash('sha256')
-    .update(value, 'utf8')
-    .digest('hex');
+function getOrderId(body) {
+  const id =
+    body?.order_id ??
+    body?.orderId ??
+    body?.order_ref ??
+    body?.order?.id ??
+    body?.id;
+
+  return id == null || String(id).trim() === ''
+    ? null
+    : String(id).trim();
 }
 
-function getTracking(body) {
-  return (
-    body?.TrackingParameters ||
-    body?.trackingParameters ||
-    body?.tracking_parameters ||
-    {}
-  );
+function getOrderStatus(body) {
+  return String(
+    body?.order_status ??
+    body?.orderStatus ??
+    body?.order?.status ??
+    body?.status ??
+    ''
+  ).trim().toLowerCase();
 }
 
 function getValue(body) {
-  const commissions = body?.Commissions || body?.commissions || {};
+  const commissions =
+    body?.Commissions ??
+    body?.commissions ??
+    {};
 
   if (commissions.charge_amount != null) {
     const amount = Number(commissions.charge_amount);
@@ -29,12 +37,15 @@ function getValue(body) {
       return null;
     }
 
+    // charge_amount pode estar em centavos.
     return amount / 100;
   }
 
   const raw =
     body?.order_amount ??
     body?.order?.price ??
+    body?.total_amount ??
+    body?.total ??
     body?.price;
 
   if (raw == null || raw === '') {
@@ -48,139 +59,22 @@ function getValue(body) {
     : null;
 }
 
-function getEventTime(body) {
-  const raw =
-    body?.paid_at ||
-    body?.approved_at ||
-    body?.created_at ||
-    body?.createdAt;
-
-  if (raw) {
-    const date = new Date(raw);
-
-    if (!Number.isNaN(date.getTime())) {
-      return Math.floor(date.getTime() / 1000);
-    }
-  }
-
-  return Math.floor(Date.now() / 1000);
-}
-
-async function sendMetaPurchase({
-  body,
-  orderId,
-  value,
-  subid,
-  tracking,
-  eventTime
-}) {
-  const pixelId = process.env.META_PIXEL_ID;
-  const accessToken = process.env.META_ACCESS_TOKEN;
-
-  if (!pixelId || !accessToken) {
-    return {
-      success: false,
-      skipped: true,
-      message: 'Credenciais da Meta não configuradas.'
-    };
-  }
-
-  const userData = {};
-
-  const customer =
-    body?.Customer ||
-    body?.customer ||
-    {};
-
-  const email =
-    customer.email ||
-    body?.customer_email;
-
-  const phone =
-    customer.phone ||
-    customer.mobile ||
-    body?.customer_phone;
-
-  if (email) {
-    userData.em = [
-      sha256(String(email).trim().toLowerCase())
-    ];
-  }
-
-  if (phone) {
-    userData.ph = [
-      sha256(String(phone).replace(/\D/g, ''))
-    ];
-  }
-
-  if (subid) {
-    userData.external_id = [sha256(String(subid))];
-  }
-
-  const fbc = tracking.fbc || body?.fbc;
-  const fbp = tracking.fbp || body?.fbp;
-
-  if (fbc) userData.fbc = fbc;
-  if (fbp) userData.fbp = fbp;
-
-  if (Object.keys(userData).length === 0) {
-    return {
-      success: false,
-      skipped: true,
-      message: 'Nenhum identificador disponível para correspondência na Meta.'
-    };
-  }
-
-  const payload = {
-    data: [
-      {
-        event_name: 'Purchase',
-        event_time: eventTime,
-        event_id: orderId,
-        action_source: 'system_generated',
-        user_data: userData,
-        custom_data: {
-          currency: 'BRL',
-          value
-        }
-      }
-    ]
-  };
-
-  const response = await fetch(
-    `https://graph.facebook.com/v23.0/${encodeURIComponent(pixelId)}/events`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    }
-  );
-
-  const result = await response.json();
-
-  return {
-    success: response.ok && !result.error,
-    httpStatus: response.status,
-    response: result
-  };
-}
-
 async function sendBeMob({ subid, orderId, value }) {
-  const baseUrl = process.env.BEMOB_POSTBACK_URL;
+  const postbackUrl = process.env.BEMOB_POSTBACK_URL;
 
-  if (!baseUrl || !subid) {
-    return {
-      success: false,
-      skipped: true,
-      message: 'URL do postback ou SubID ausente.'
-    };
+  if (!postbackUrl) {
+    throw new Error('BEMOB_POSTBACK_URL não configurada.');
   }
 
-  const url = new URL(baseUrl);
+  if (!subid) {
+    throw new Error(
+      'ID de clique do BeMob (subid/cid) ausente no webhook da Kiwify.'
+    );
+  }
 
+  const url = new URL(postbackUrl);
+
+  // cid é o ID de clique do BeMob que será usado para atribuir a conversão ao Google Ads
   url.searchParams.set('cid', String(subid));
   url.searchParams.set('payout', value.toFixed(2));
   url.searchParams.set('txid', orderId);
@@ -190,8 +84,12 @@ async function sendBeMob({ subid, orderId, value }) {
     signal: AbortSignal.timeout(10000)
   });
 
+  if (!response.ok) {
+    throw new Error(`BeMob respondeu com HTTP ${response.status}.`);
+  }
+
   return {
-    success: response.ok,
+    success: true,
     httpStatus: response.status
   };
 }
@@ -202,14 +100,14 @@ export default async function handler(req, res) {
 
     return res.status(405).json({
       success: false,
-      error: 'Método não permitido'
+      error: 'Método não permitido.'
     });
   }
 
   if (!validateWebhookAuth(req)) {
     return res.status(401).json({
       success: false,
-      error: 'Autenticação inválida'
+      error: 'Autenticação inválida.'
     });
   }
 
@@ -218,32 +116,22 @@ export default async function handler(req, res) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return res.status(400).json({
       success: false,
-      error: 'Corpo da requisição inválido'
+      error: 'Corpo da requisição inválido.'
     });
   }
 
-  const status = String(
-    body.order_status ||
-    body.orderStatus ||
-    body.status ||
-    ''
-  ).toLowerCase();
+  const status = getOrderStatus(body);
 
+  // Ignora pagamentos não confirmados
   if (!['paid', 'approved', 'complete'].includes(status)) {
     return res.status(200).json({
       success: true,
       ignored: true,
-      message: 'Pedido ignorado: status não aprovado.'
+      message: 'Pagamento ainda não confirmado; conversão ignorada.'
     });
   }
 
-  const orderId = String(
-    body.order_id ||
-    body.orderId ||
-    body.order_ref ||
-    body.id ||
-    ''
-  );
+  const orderId = getOrderId(body);
 
   if (!orderId) {
     return res.status(400).json({
@@ -261,54 +149,31 @@ export default async function handler(req, res) {
     });
   }
 
-  const tracking = getTracking(body);
   const subid = extractTrackingId(body);
-  const eventTime = getEventTime(body);
-  const results = {};
 
   try {
-    results.bemob = await sendBeMob({
+    const bemob = await sendBeMob({
       subid,
       orderId,
       value
     });
-  } catch (error) {
-    results.bemob = {
-      success: false,
-      error: error.message
-    };
-  }
 
-  try {
-    results.meta = await sendMetaPurchase({
-      body,
+    return res.status(200).json({
+      success: true,
       orderId,
       value,
+      currency: 'BRL',
       subid,
-      tracking,
-      eventTime
+      results: { bemob },
+      message: 'Postback encaminhado ao BeMob com sucesso.'
     });
   } catch (error) {
-    results.meta = {
+    console.error('Falha no encaminhamento ao BeMob:', error.message);
+
+    return res.status(502).json({
       success: false,
+      orderId,
       error: error.message
-    };
+    });
   }
-
-  results.google = {
-    success: false,
-    skipped: true,
-    message:
-      'O ID AW-17649842006 e a etiqueta e4tQCKrw35sdENbujOBB são dados do Google tag; faltam credenciais e configuração da API para enviar a conversão pelo servidor.'
-  };
-
-  return res.status(200).json({
-    success: true,
-    orderId,
-    value,
-    currency: 'BRL',
-    subid: subid || null,
-    results,
-    message: 'Webhook processado. Verifique o resultado individual de cada plataforma.'
-  });
 }
