@@ -1,9 +1,10 @@
+
 {
   "name": "metagooglesera-s2s",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Endpoint S2S para processar webhooks de vendas da Kiwify e encaminhar conversões ao BeMob para atribuição no Google Ads.",
+  "description": "Endpoint S2S para receber e validar webhooks de vendas da Kiwify na Vercel.",
   "engines": {
     "node": ">=20"
   },
